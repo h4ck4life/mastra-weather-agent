@@ -121,7 +121,7 @@ Adapt all recommendations to match the user's specified budget preference if pro
 Keep all suggestions concise and practical. Adapt recommendations based on weather conditions.
 Do not include search result notes at the end of your response.
 `,
-  model: openaiProvider("meta-llama/Llama-3.3-70B-Instruct-Turbo"),
+  model: openaiProvider(process.env.OPENAI_MODEL_ID as string),
   tools: { braveSearchTool },
 });
 
