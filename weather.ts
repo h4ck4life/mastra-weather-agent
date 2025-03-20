@@ -16,6 +16,14 @@ const braveSearchTool = createTool({
   description: "Search the web for information about a location",
   inputSchema: z.object({
     query: z.string().describe("The search query"),
+    startDate: z
+      .string()
+      .optional()
+      .describe("Start date of the trip (YYYY-MM-DD)"),
+    endDate: z
+      .string()
+      .optional()
+      .describe("End date of the trip (YYYY-MM-DD)"),
   }),
   outputSchema: z.object({
     results: z.array(
@@ -28,8 +36,14 @@ const braveSearchTool = createTool({
   }),
   execute: async ({ context }) => {
     const apiKey = process.env.BRAVE_SEARCH_API_KEY as string;
+
+    let searchQuery = context.query;
+    if (context.startDate && context.endDate) {
+      searchQuery += ` events from ${context.startDate} to ${context.endDate}`;
+    }
+
     const searchUrl = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(
-      context.query
+      searchQuery
     )}&count=5`;
 
     const response = await fetch(searchUrl, {
@@ -60,57 +74,82 @@ const braveSearchTool = createTool({
 const agent = new Agent({
   name: "Travel Planner",
   instructions: `
-   You are a travel expert who creates practical day-by-day itineraries.
-   
-   Use the brave-search tool FIRST to find information about local attractions, activities, restaurants, and accommodations.
-   THEN create one single complete itinerary. Do not show your initial draft - only show the final version.
-   
-   For each day, include:
-   
-   DAY X (DATE)
-   
-   WEATHER: Brief weather summary with temperature and conditions
-   
-   BREAKFAST: Suggest one local breakfast spot with brief description
-   
-   MORNING: One or two activities based on weather, with times and locations
-   
-   LUNCH: Suggest one local eatery with brief description
-   
-   AFTERNOON: One or two activities based on weather, with times and locations
-   
-   DINNER: Suggest one local restaurant with brief description
-   
-   EVENING: Optional evening activity if appropriate
-   
-   If the itinerary is multi-day, include ACCOMMODATION recommendations at the end. Provide options for different budget levels (Budget, Mid-range, Luxury).
-   
-   Adapt all recommendations to match the user's specified budget preference if provided.
-   Keep all suggestions concise and practical. Adapt recommendations based on weather conditions.
-   Do not include search result notes at the end of your response.
- `,
+ You are a travel expert who creates practical day-by-day itineraries.
+ 
+ Use the brave-search tool FIRST to find information about:
+ 1. Local attractions and activities
+ 2. Special events, festivals, or seasonal activities happening during the specified dates (particularly major local festivals like Loy Krathong in Thailand)
+ 3. Restaurants and accommodations appropriate for the budget level
+ 4. Best time to visit this destination and whether the planned dates are optimal
+ 
+ Always perform these searches before creating the itinerary:
+ - "[location] festivals [month/year of trip]" (e.g., "Bangkok festivals November 2025")
+ - "[location] events [trip dates]" 
+ - "best time to visit [location]"
+ 
+ THEN create one single complete itinerary. Do not show your initial draft - only show the final version.
+ 
+ Start the itinerary with:
+ 1. DESTINATION OVERVIEW: Brief introduction to the location
+ 2. BEST TIME TO VISIT: Information about optimal seasons and whether the planned dates are good
+ 3. SPECIAL EVENTS/FESTIVALS: Any notable celebrations during the stay
+ 
+ For each day, include:
+ 
+ DAY X: YYYY-MM-DD
+ 
+ WEATHER: Brief weather summary with temperature and conditions (if provided, otherwise skip)
+ 
+ BREAKFAST: Suggest one local breakfast spot with brief description
+ 
+ MORNING: One or two activities based on weather, with times and locations
+ 
+ LUNCH: Suggest one local eatery with brief description
+ 
+ AFTERNOON: One or two activities based on weather, with times and locations
+ 
+ DINNER: Suggest one local restaurant with brief description
+ 
+ EVENING: Optional evening activity if appropriate
+ 
+ Prioritize any special events, festivals or performances happening on specific dates.
+ 
+ If the itinerary is multi-day, include ACCOMMODATION recommendations at the end. Provide options for different budget levels (Budget, Mid-range, Luxury).
+ 
+ Adapt all recommendations to match the user's specified budget preference if provided.
+ Keep all suggestions concise and practical. Adapt recommendations based on weather conditions.
+ Do not include search result notes at the end of your response.
+`,
   model: openaiProvider("meta-llama/Llama-3.3-70B-Instruct-Turbo"),
   tools: { braveSearchTool },
 });
 
 const fetchWeather = new Step({
   id: "fetch-weather",
-  description: "Fetches weather forecast for a given city",
+  description: "Fetches weather forecast for a given city and date range",
   inputSchema: z.object({
     city: z.string().describe("The city to get the weather for"),
-    days: z.number().describe("Number of days for the itinerary").default(3),
+    startDate: z.string().describe("Start date in YYYY-MM-DD format"),
+    endDate: z.string().describe("End date in YYYY-MM-DD format"),
     budget: z.enum(["budget", "mid-range", "luxury"]).default("mid-range"),
   }),
   execute: async ({ context }) => {
     const triggerData = context?.getStepResult<{
       city: string;
-      days: number;
+      startDate: string;
+      endDate: string;
       budget: string;
     }>("trigger");
 
     if (!triggerData) {
       throw new Error("Trigger data not found");
     }
+
+    // Calculate number of days
+    const start = new Date(triggerData.startDate);
+    const end = new Date(triggerData.endDate);
+    const days =
+      Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1;
 
     const geocodingUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(
       triggerData.city
@@ -124,29 +163,77 @@ const fetchWeather = new Step({
 
     const { latitude, longitude, name } = geocodingData.results[0];
 
+    // Fetch historical data for the next 16 days (max supported by the API)
     const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_mean,weathercode&timezone=auto`;
     const response = await fetch(weatherUrl);
     const data = await response.json();
 
-    // Limit the forecast to the requested number of days
-    const numDays = Math.min(triggerData.days, data.daily.time.length);
-
-    const forecast = data.daily.time
-      .slice(0, numDays)
-      .map((date: string, index: number) => ({
-        date,
-        maxTemp: data.daily.temperature_2m_max[index],
-        minTemp: data.daily.temperature_2m_min[index],
-        precipitationChance: data.daily.precipitation_probability_mean[index],
-        condition: getWeatherCondition(data.daily.weathercode[index]),
+    if (!data.daily || !data.daily.time) {
+      console.log(
+        "Weather API didn't return expected data structure - continuing without weather data"
+      );
+      return {
+        forecast: [],
         location: name,
-      }));
+        startDate: triggerData.startDate,
+        endDate: triggerData.endDate,
+        days,
+        budget: triggerData.budget,
+        weatherAvailable: false,
+      };
+    }
+
+    // Filter to the requested date range
+    let forecast: Array<{
+      date: string;
+      maxTemp: number;
+      minTemp: number;
+      precipitationChance: number;
+      condition: string;
+      location: string;
+    }> = [];
+
+    const dateStart = new Date(triggerData.startDate);
+    const dateEnd = new Date(triggerData.endDate);
+
+    for (let i = 0; i < data.daily.time.length; i++) {
+      const currentDate = new Date(data.daily.time[i]);
+
+      if (currentDate >= dateStart && currentDate <= dateEnd) {
+        forecast.push({
+          date: data.daily.time[i],
+          maxTemp: data.daily.temperature_2m_max[i],
+          minTemp: data.daily.temperature_2m_min[i],
+          precipitationChance: data.daily.precipitation_probability_mean[i],
+          condition: getWeatherCondition(data.daily.weathercode[i]),
+          location: name,
+        });
+      }
+    }
+
+    if (forecast.length === 0) {
+      console.log(
+        "No weather data available for the specified date range - continuing without weather data"
+      );
+      return {
+        forecast: [],
+        location: name,
+        startDate: triggerData.startDate,
+        endDate: triggerData.endDate,
+        days,
+        budget: triggerData.budget,
+        weatherAvailable: false,
+      };
+    }
 
     return {
       forecast,
       location: name,
-      days: numDays,
+      startDate: triggerData.startDate,
+      endDate: triggerData.endDate,
+      days,
       budget: triggerData.budget,
+      weatherAvailable: true,
     };
   },
 });
@@ -163,8 +250,11 @@ const forecastSchema = z.object({
     })
   ),
   location: z.string(),
+  startDate: z.string(),
+  endDate: z.string(),
   days: z.number(),
   budget: z.enum(["budget", "mid-range", "luxury"]),
+  weatherAvailable: z.boolean().optional(),
 });
 
 const planItinerary = new Step({
@@ -180,16 +270,59 @@ const planItinerary = new Step({
       throw new Error("Forecast data not found");
     }
 
-    const { forecast, location, days, budget } = data;
+    const {
+      forecast,
+      location,
+      startDate,
+      endDate,
+      days,
+      budget,
+      weatherAvailable,
+    } = data;
 
-    const prompt = `Create a ${days}-day itinerary for ${location} based on this weather forecast:
-   ${JSON.stringify(forecast, null, 2)}
-   
-   Budget preference: ${budget}
-   
-   Include breakfast, lunch, and dinner recommendations for each day along with morning and afternoon activities. If more than 1 day, include accommodation options.
-   
-   Use the brave-search tool to find popular attractions, activities, restaurants, and accommodations in ${location} that match the ${budget} budget level.`;
+    // Extract month and year for festival search
+    const tripDate = new Date(startDate);
+    const month = tripDate.toLocaleString("en-US", { month: "long" });
+    const year = tripDate.getFullYear();
+
+    let prompt;
+
+    if (weatherAvailable === false || forecast.length === 0) {
+      prompt = `Create a ${days}-day itinerary for ${location} from ${startDate} to ${endDate}. 
+ 
+Budget preference: ${budget}
+
+First, search for:
+1. "${location} festivals ${month} ${year}" to find any local festivals or events
+2. "${location} events ${startDate} to ${endDate}" to find current happenings
+3. "best time to visit ${location}" to determine if these dates are optimal
+
+Include this information at the beginning of the itinerary:
+- Brief destination overview
+- Best time to visit information and whether the planned dates are good
+- Any special events or festivals happening during the stay (especially major festivals)
+
+Then for each day, include breakfast, lunch, and dinner recommendations along with morning and afternoon activities. If more than 1 day, include accommodation options.
+ 
+Weather data is not available for the requested dates. Skip weather information in the itinerary.`;
+    } else {
+      prompt = `Create a ${days}-day itinerary for ${location} from ${startDate} to ${endDate} based on this weather forecast:
+${JSON.stringify(forecast, null, 2)}
+ 
+Budget preference: ${budget}
+
+First, search for:
+1. "${location} festivals ${month} ${year}" to find any local festivals or events
+2. "${location} events ${startDate} to ${endDate}" to find current happenings
+3. "best time to visit ${location}" to determine if these dates are optimal
+
+Include this information at the beginning of the itinerary:
+- Brief destination overview
+- Best time to visit information and whether the planned dates are good
+- Any special events or festivals happening during the stay (especially major festivals)
+
+Then for each day, include breakfast, lunch, and dinner recommendations along with morning and afternoon activities. If more than 1 day, include accommodation options.`;
+    }
 
     const response = await agent.stream([
       {
@@ -208,6 +341,8 @@ const planItinerary = new Step({
     return {
       itinerary: itineraryText,
       location,
+      startDate,
+      endDate,
       days,
       budget,
     };
@@ -240,7 +375,8 @@ const itineraryWorkflow = new Workflow({
   name: "itineraryWorkflow",
   triggerSchema: z.object({
     city: z.string().describe("The city to get the weather for"),
-    days: z.number().describe("Number of days for the itinerary").default(3),
+    startDate: z.string().describe("Start date in YYYY-MM-DD format"),
+    endDate: z.string().describe("End date in YYYY-MM-DD format"),
     budget: z
       .enum(["budget", "mid-range", "luxury"])
       .default("mid-range")
@@ -263,9 +399,10 @@ async function main() {
 
   const result = await start({
     triggerData: {
-      city: "Bandung",
-      days: 3,
-      budget: "budget", // Can be "budget", "mid-range", or "luxury"
+      city: "Bangkok",
+      startDate: "2025-11-04",
+      endDate: "2025-11-05",
+      budget: "mid-range",
     },
   });
 
