@@ -26,6 +26,7 @@ The **Mastra Weather Agent** is a travel planning tool that generates day-by-day
    ```env
    OPENAI_API_KEY=<your-openai-api-key>
    OPENAI_BASE_URL=<your-openai-base-url>
+   OPENAI_MODEL_ID=<model-id>
    BRAVE_SEARCH_API_KEY=<your-brave-search-api-key>
    ```
 
