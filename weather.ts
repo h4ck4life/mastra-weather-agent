@@ -5,6 +5,7 @@ import { Step, Workflow } from "@mastra/core/workflows";
 import { z } from "zod";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createTool } from "@mastra/core/tools";
+import chalk from "chalk";
 
 const openaiProvider = createOpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -74,51 +75,51 @@ const braveSearchTool = createTool({
 const agent = new Agent({
   name: "Travel Planner",
   instructions: `
- You are a travel expert who creates practical day-by-day itineraries.
- 
- Use the brave-search tool FIRST to find information about:
- 1. Local attractions and activities
- 2. Special events, festivals, or seasonal activities happening during the specified dates (particularly major local festivals like Loy Krathong in Thailand)
- 3. Restaurants and accommodations appropriate for the budget level
- 4. Best time to visit this destination and whether the planned dates are optimal
- 
- Always perform these searches before creating the itinerary:
- - "[location] festivals [month/year of trip]" (e.g., "Bangkok festivals November 2025")
- - "[location] events [trip dates]" 
- - "best time to visit [location]"
- 
- THEN create one single complete itinerary. Do not show your initial draft - only show the final version.
- 
- Start the itinerary with:
- 1. DESTINATION OVERVIEW: Brief introduction to the location
- 2. BEST TIME TO VISIT: Information about optimal seasons and whether the planned dates are good
- 3. SPECIAL EVENTS/FESTIVALS: Any notable celebrations during the stay
- 
- For each day, include:
- 
- DAY X: YYYY-MM-DD
- 
- WEATHER: Brief weather summary with temperature and conditions (if provided, otherwise skip)
- 
- BREAKFAST: Suggest one local breakfast spot with brief description
- 
- MORNING: One or two activities based on weather, with times and locations
- 
- LUNCH: Suggest one local eatery with brief description
- 
- AFTERNOON: One or two activities based on weather, with times and locations
- 
- DINNER: Suggest one local restaurant with brief description
- 
- EVENING: Optional evening activity if appropriate
- 
- Prioritize any special events, festivals or performances happening on specific dates.
- 
- If the itinerary is multi-day, include ACCOMMODATION recommendations at the end. Provide options for different budget levels (Budget, Mid-range, Luxury).
- 
- Adapt all recommendations to match the user's specified budget preference if provided.
- Keep all suggestions concise and practical. Adapt recommendations based on weather conditions.
- Do not include search result notes at the end of your response.
+You are a travel expert who creates practical day-by-day itineraries.
+
+Use the brave-search tool FIRST to find information about:
+1. Local attractions and activities
+2. Special events, festivals, or seasonal activities happening during the specified dates (particularly major local festivals like Loy Krathong in Thailand)
+3. Restaurants and accommodations appropriate for the budget level
+4. Best time to visit this destination and whether the planned dates are optimal
+
+Always perform these searches before creating the itinerary:
+- "[location] festivals [month/year of trip]" (e.g., "Bangkok festivals November 2025")
+- "[location] events [trip dates]" 
+- "best time to visit [location]"
+
+THEN create one single complete itinerary. Do not show your initial draft - only show the final version.
+
+Start the itinerary with:
+1. DESTINATION OVERVIEW: Brief introduction to the location
+2. BEST TIME TO VISIT: Information about optimal seasons and whether the planned dates are good
+3. SPECIAL EVENTS/FESTIVALS: Any notable celebrations during the stay
+
+For each day, include:
+
+DAY X: YYYY-MM-DD
+
+WEATHER: Brief weather summary with temperature and conditions (if provided, otherwise skip)
+
+BREAKFAST: Suggest one local breakfast spot with brief description
+
+MORNING: One or two activities based on weather, with times and locations
+
+LUNCH: Suggest one local eatery with brief description
+
+AFTERNOON: One or two activities based on weather, with times and locations
+
+DINNER: Suggest one local restaurant with brief description
+
+EVENING: Optional evening activity if appropriate
+
+Prioritize any special events, festivals or performances happening on specific dates.
+
+If the itinerary is multi-day, include ACCOMMODATION recommendations at the end. Provide options for different budget levels (Budget, Mid-range, Luxury).
+
+Adapt all recommendations to match the user's specified budget preference if provided.
+Keep all suggestions concise and practical. Adapt recommendations based on weather conditions.
+Do not include search result notes at the end of your response.
 `,
   model: openaiProvider("meta-llama/Llama-3.3-70B-Instruct-Turbo"),
   tools: { braveSearchTool },
@@ -170,7 +171,9 @@ const fetchWeather = new Step({
 
     if (!data.daily || !data.daily.time) {
       console.log(
-        "Weather API didn't return expected data structure - continuing without weather data"
+        chalk.red(
+          "Weather API didn't return expected data structure - continuing without weather data"
+        )
       );
       return {
         forecast: [],
@@ -213,7 +216,9 @@ const fetchWeather = new Step({
 
     if (forecast.length === 0) {
       console.log(
-        "No weather data available for the specified date range - continuing without weather data"
+        chalk.yellow(
+          "No weather data available for the specified date range - continuing without weather data"
+        )
       );
       return {
         forecast: [],
@@ -226,6 +231,7 @@ const fetchWeather = new Step({
       };
     }
 
+    console.log(chalk.green("✓ Weather data fetched successfully"));
     return {
       forecast,
       location: name,
@@ -285,11 +291,23 @@ const planItinerary = new Step({
     const month = tripDate.toLocaleString("en-US", { month: "long" });
     const year = tripDate.getFullYear();
 
+    console.log(
+      chalk.blue.bold(`\n📍 Planning itinerary for ${chalk.white(location)}`)
+    );
+    console.log(
+      chalk.blue(
+        `🗓️  Dates: ${chalk.white(startDate)} to ${chalk.white(
+          endDate
+        )} (${chalk.white(days)} days)`
+      )
+    );
+    console.log(chalk.blue(`💰 Budget: ${chalk.white(budget)}\n`));
+
     let prompt;
 
     if (weatherAvailable === false || forecast.length === 0) {
       prompt = `Create a ${days}-day itinerary for ${location} from ${startDate} to ${endDate}. 
- 
+
 Budget preference: ${budget}
 
 First, search for:
@@ -303,12 +321,12 @@ Include this information at the beginning of the itinerary:
 - Any special events or festivals happening during the stay (especially major festivals)
 
 Then for each day, include breakfast, lunch, and dinner recommendations along with morning and afternoon activities. If more than 1 day, include accommodation options.
- 
+
 Weather data is not available for the requested dates. Skip weather information in the itinerary.`;
     } else {
       prompt = `Create a ${days}-day itinerary for ${location} from ${startDate} to ${endDate} based on this weather forecast:
 ${JSON.stringify(forecast, null, 2)}
- 
+
 Budget preference: ${budget}
 
 First, search for:
@@ -324,6 +342,7 @@ Include this information at the beginning of the itinerary:
 Then for each day, include breakfast, lunch, and dinner recommendations along with morning and afternoon activities. If more than 1 day, include accommodation options.`;
     }
 
+    console.log(chalk.yellow("🔍 Searching for destination information..."));
     const response = await agent.stream([
       {
         role: "user",
@@ -332,9 +351,10 @@ Then for each day, include breakfast, lunch, and dinner recommendations along wi
     ]);
 
     let itineraryText = "";
+    console.log(chalk.green.bold("\n✏️  Generating Itinerary:\n"));
 
     for await (const chunk of response.textStream) {
-      process.stdout.write(chunk);
+      process.stdout.write(chalk.cyan(chunk));
       itineraryText += chunk;
     }
 
@@ -395,19 +415,42 @@ const mastra = new Mastra({
 });
 
 async function main() {
+  console.log(chalk.green.bold("\n🌴 TRAVEL ITINERARY GENERATOR 🌴"));
+  console.log(chalk.green("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"));
+
   const { start } = mastra.getWorkflow("itineraryWorkflow").createRun();
 
-  const result = await start({
+  console.log(chalk.yellow("⚙️  Initializing workflow..."));
+
+  const workflowResult = await start({
     triggerData: {
-      city: "Bangkok",
+      city: "Alor Setar",
       startDate: "2025-11-04",
       endDate: "2025-11-05",
       budget: "mid-range",
     },
   });
 
-  console.log("\n \n");
-  console.log(result);
+  // Access the final step's output (plan-itinerary)
+  //@ts-ignore
+  const result = workflowResult.results["plan-itinerary"].output;
+
+  console.log("\n");
+  console.log(chalk.magenta.bold("✨ ITINERARY GENERATED SUCCESSFULLY ✨"));
+  console.log(chalk.magenta("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
+  console.log(
+    `${chalk.blue.bold("Location:")} ${chalk.white(result.location)}`
+  );
+  console.log(
+    `${chalk.blue.bold("Dates:")} ${chalk.white(
+      `${result.startDate} to ${result.endDate}`
+    )}`
+  );
+  console.log(
+    `${chalk.blue.bold("Duration:")} ${chalk.white(`${result.days} days`)}`
+  );
+  console.log(`${chalk.blue.bold("Budget:")} ${chalk.white(result.budget)}`);
+  console.log("\n");
 }
 
 main();
